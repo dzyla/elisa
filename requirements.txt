@@ -1,0 +1,7 @@
+hashlib
+matplotlib
+numpy<2.0
+pandas
+plotly
+scipy
+streamlit
