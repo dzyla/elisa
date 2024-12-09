@@ -62,6 +62,13 @@ def validate_plate_dataframe(df, source):
         st.warning(f"{source}: Expected {expected_shape[0]} rows and {expected_shape[1]} columns, got {df.shape}. Proceeding.")
     df.index = ROWS[:df.shape[0]]
     df.columns = COLUMNS[:df.shape[1]]
+    
+    # make data numeric if possible
+    try:
+        df = df.astype(float)
+    except Exception as e:
+        st.warning(f"Could not convert data to numeric: {e}. Make sure all values are numbers.")
+        st.stop()
     return df
 
 def color_viridis(val, vmin, vmax):
@@ -80,11 +87,13 @@ def apply_viridis(df):
 # Existing steps here...
 def upload_data():
     st.header("1. Upload Raw ELISA Plate Data")
-    upload_method = st.radio(
-        "Choose data upload method:",
-        ("Upload Files", "Paste Tab-Separated Values"),
-        horizontal=True, index=1
-    )
+    upload_method = "Paste Tab-Separated Values"
+    # st.radio(
+    #     "Choose data upload method:",
+    #     ("Upload Files", "Paste Tab-Separated Values"),
+    #     horizontal=True, index=1
+    # )
+    #### Need to fix that
     
     if upload_method == "Upload Files":
         uploaded_files = st.file_uploader("Choose CSV or Excel files", accept_multiple_files=True, type=["csv", "xlsx"])
