@@ -574,8 +574,8 @@ def process_data():
 
         
         # melt data
-        df_long_values = pd.melt(transposed_means.reset_index(), id_vars='index', value_vars=['MeV', 'MuV', 'NiV', 'hMPV'])
-        df_long_sem = pd.melt(transposed_sems.reset_index(), id_vars='index', value_vars=['MeV', 'MuV', 'NiV', 'hMPV'])
+        df_long_values = pd.melt(transposed_means.reset_index(), id_vars='index', value_vars=st.session_state.plate_names)
+        df_long_sem = pd.melt(transposed_sems.reset_index(), id_vars='index', value_vars=st.session_state.plate_names)
 
         print(df_long_values)
         print(df_long_sem)
