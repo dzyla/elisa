@@ -7,6 +7,7 @@ import matplotlib as mpl
 import plotly.express as px  
 from scipy.stats import sem  
 import hashlib  
+import plotly.graph_objects as go
 
 # Define wells and rows, columns  
 ROWS = list("ABCDEFGH")  
@@ -358,6 +359,42 @@ def annotate_conditions():
                     st.session_state.conditions_list.append(conditions)  
                     
 
+def get_plate_reference_value(plate, well_str):
+    """
+    Calculate reference value from specified wells in a plate.
+    
+    Args:
+        plate (pd.DataFrame): Plate data
+        well_str (str): Comma-separated list of wells (e.g., "A1,A2,A3")
+        
+    Returns:
+        float: Mean value of specified wells
+    """
+    if not well_str:
+        return None
+        
+    wells = [well.strip().upper() for well in well_str.split(',')]
+    values = []
+    
+    for well in wells:
+        try:
+            # Extract row and column from well
+            row = well[0]
+            col = int(well[1:])
+            
+            # Get value from plate
+            value = plate.loc[row, col]
+            values.append(value)
+        except (KeyError, ValueError, IndexError):
+            st.warning(f"Well {well} not found in plate. Skipping.")
+            continue
+    
+    if not values:
+        st.error("No valid wells found.")
+        return None
+        
+    return np.mean(values)
+
 def plate_modification():  
     st.header("3. Plate Modification/Normalization")  
     if not st.session_state.raw_data:  
@@ -375,6 +412,12 @@ def plate_modification():
 
     scale_choice = st.radio("Select Scale for Min-Max:", ("0-1", "0-100%"), index=0)  
     scale_factor = 1.0 if scale_choice == "0-1" else 100.0  
+
+    # Add automatic min-max normalization option  
+    auto_normalize = st.checkbox("Use Automatic Min-Max Normalization", value=False)  
+
+    if auto_normalize:  
+        st.info("Automatic normalization will use the minimum and maximum values from each plate.")
 
     for idx, plate_name in enumerate(st.session_state.plate_names):  
         st.subheader(f"Normalization for {plate_name}")  
@@ -466,19 +509,33 @@ def plate_modification():
                 plate_max = max_val  
 
             # Apply normalization logic  
-            if plate_min is not None and plate_max is not None:  
-                denom = plate_max - plate_min  
-                if denom != 0:  
-                    plate_modified = (plate_modified - plate_min) / denom * scale_factor  
+            if auto_normalize:  
+                # Calculate plate-wide min and max  
+                plate_min = plate_modified.values.min()  
+                plate_max = plate_modified.values.max()  
+
+                # Apply min-max normalization  
+                if plate_max != plate_min:  
+                    plate_modified = (plate_modified - plate_min) / (plate_max - plate_min) * scale_factor  
+                    st.success(f"Automatic min-max normalization applied to {plate_name}.")  
+                    st.info(f"Plate min: {plate_min:.2f}, Plate max: {plate_max:.2f}")  
                 else:  
-                    st.warning(f"Max and min are the same for {plate_name}. Cannot min-max normalize this plate.")  
-            elif plate_min is not None and plate_max is None:  
-                plate_modified = plate_modified - plate_min  
-            elif plate_min is None and plate_max is not None:  
-                if plate_max != 0:  
-                    plate_modified = plate_modified / plate_max  
-                else:  
-                    st.warning(f"Max value is zero for {plate_name}. Cannot divide by zero for this plate.")  
+                    st.warning(f"All values in {plate_name} are identical ({plate_min:.2f}). Cannot normalize.")  
+            else:  
+                # Manual normalization logic  
+                if plate_min is not None and plate_max is not None:  
+                    denom = plate_max - plate_min  
+                    if denom != 0:  
+                        plate_modified = (plate_modified - plate_min) / denom * scale_factor  
+                    else:  
+                        st.warning(f"Max and min are the same for {plate_name}. Cannot min-max normalize this plate.")  
+                elif plate_min is not None and plate_max is None:  
+                    plate_modified = plate_modified - plate_min  
+                elif plate_min is None and plate_max is not None:  
+                    if plate_max != 0:  
+                        plate_modified = plate_modified / plate_max  
+                    else:  
+                        st.warning(f"Max value is zero for {plate_name}. Cannot divide by zero for this plate.")
 
             st.session_state.normalized_data[idx] = plate_modified  
             st.success(f"Normalization applied to {plate_name}.")  
@@ -616,6 +673,129 @@ def process_data():
         st.session_state.current_step = "Display Results"  
         return True  
     return False  
+
+def process_data():
+    st.header("4. Process Data")
+
+    if not st.session_state.raw_data:
+        st.warning("Please upload raw data before processing.")
+        return False
+    if not st.session_state.conditions_list:
+        st.warning("Please annotate conditions before processing.")
+        return False
+    if not st.session_state.normalized_data:
+        st.session_state.normalized_data = [df.copy() for df in st.session_state.raw_data]
+
+    if st.button("Submit and Process Data"):
+        all_plate_means = []
+        all_plate_sems = []
+        all_individual_values = []  # New list to store individual values
+        all_conditions = set()
+
+        for plate_idx, plate in enumerate(st.session_state.normalized_data):
+            plate_name = st.session_state.plate_names[plate_idx]
+            conditions = st.session_state.conditions_list[plate_idx]
+
+            plate_means = {}
+            plate_sems = {}
+
+            for condition in conditions:
+                wells = condition['wells']
+                condition_name = condition['name']
+                all_conditions.add(condition_name)
+
+                values = []
+                for well in wells:
+                    if not validate_well_identifier(well):
+                        continue
+                    row = well[0].upper()
+                    col = int(well[1:])
+                    try:
+                        value = float(plate.at[row, col])
+                        values.append(value)
+                        # Store individual values
+                        all_individual_values.append({
+                            'Condition': condition_name,
+                            'Plate': plate_name,
+                            'Value': value,
+                            'Well': well
+                        })
+                    except (KeyError, ValueError):
+                        continue
+
+                if len(values) > 1:
+                    cond_mean = np.mean(values)
+                    cond_sem = sem(values, nan_policy='omit')
+                elif len(values) == 1:
+                    cond_mean = values[0]
+                    cond_sem = np.nan
+                else:
+                    cond_mean = np.nan
+                    cond_sem = np.nan
+
+                plate_means[condition_name] = cond_mean
+                plate_sems[condition_name] = cond_sem
+
+            all_plate_means.append(pd.Series(plate_means, name=plate_name))
+            all_plate_sems.append(pd.Series(plate_sems, name=plate_name))
+
+        # Create DataFrames from all plates
+        per_plate_means = pd.DataFrame(all_plate_means)
+        per_plate_sems = pd.DataFrame(all_plate_sems)
+
+        # Create DataFrame with individual values
+        individual_values_df = pd.DataFrame(all_individual_values)
+
+        st.session_state.per_plate_means = per_plate_means
+        st.session_state.per_plate_sems = per_plate_sems
+        st.session_state.individual_values = individual_values_df  # Store individual values
+
+        # Display mean and SEM tables
+        st.subheader("Per-Plate Mean Values")
+        st.dataframe(per_plate_means.style.format("{:.2f}"))
+
+        st.subheader("Per-Plate SEM Values")
+        st.dataframe(per_plate_sems.style.format("{:.2f}"))
+
+        # Display individual values table
+        st.subheader("Individual Values")
+        st.dataframe(individual_values_df.style.format({'Value': '{:.2f}'}))
+
+        # Generate filename with date and plate names
+        from datetime import datetime
+        date_str = datetime.now().strftime('%Y%m%d')
+        plate_names_str = '_'.join([name.replace(' ', '_') for name in st.session_state.plate_names])
+
+        # Download buttons for both formats
+        # 1. Mean and SEM format
+        means_sems_df = pd.DataFrame({
+            'Condition': individual_values_df['Condition'].unique(),
+            'Mean': [per_plate_means[cond].mean() for cond in individual_values_df['Condition'].unique()],
+            'SEM': [per_plate_sems[cond].mean() for cond in individual_values_df['Condition'].unique()]
+        })
+        
+        csv_means_sems = means_sems_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Mean and SEM Results",
+            data=csv_means_sems,
+            file_name=f'ELISA_means_sems_{date_str}_{plate_names_str}.csv',
+            mime='text/csv',
+        )
+
+        # 2. Individual values format
+        csv_individual = individual_values_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Individual Values",
+            data=csv_individual,
+            file_name=f'ELISA_individual_values_{date_str}_{plate_names_str}.csv',
+            mime='text/csv',
+        )
+
+        st.session_state.final_results = means_sems_df
+        st.success("Data processing complete.")
+        st.session_state.current_step = "Display Results"
+        return True
+    return False
 
 def display_results():  
     st.header("5. Final Results")  
@@ -778,6 +958,239 @@ def display_results():
             )  
             st.plotly_chart(fig_plate, use_container_width=True)
 
+def display_results():
+    st.header("5. Final Results")
+
+    if st.session_state.final_results.empty:
+        st.warning("No results to display. Please process the data first.")
+        return
+
+    st.subheader("Combined Results Across Plates")
+    c1, c2, c3 = st.columns(3)
+    sort_data = c1.checkbox("Sort Combined Data", value=False)
+    if sort_data:
+        sort_column = c2.selectbox(
+            "Select column to sort combined data by:",
+            ['Condition', 'Mean', 'SEM']
+        )
+        st.session_state.final_results = st.session_state.final_results.sort_values(
+            sort_column,
+            ascending=False
+        )
+
+    # Display final results
+    styled_results = st.session_state.final_results.style.format({
+        'Mean': "{:.2f}",
+        'SEM': "{:.2f}"
+    })
+    st.dataframe(styled_results)
+
+    # Display individual values if available
+    if hasattr(st.session_state, 'individual_values'):
+        st.subheader("Individual Values")
+        individual_df = st.session_state.individual_values
+        st.dataframe(individual_df.style.format({
+            'Value': "{:.2f}"
+        }))
+
+        # Generate filename with date and plate names
+        from datetime import datetime
+        date_str = datetime.now().strftime('%Y%m%d')
+        plate_names_str = '_'.join([name.replace(' ', '_') for name in st.session_state.plate_names])
+
+        # Download buttons for both formats
+        csv_individual = individual_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Individual Values",
+            data=csv_individual,
+            file_name=f'ELISA_individual_values_{date_str}_{plate_names_str}.csv',
+            mime='text/csv',
+        )
+
+    # Plot combined results
+    fig_bar = px.bar(
+        st.session_state.final_results,
+        x='Condition',
+        y='Mean',
+        error_y='SEM',
+        color='Mean',
+        color_continuous_scale='Viridis',
+        title='Combined ELISA Results (Across All Plates)',
+        labels={'Mean': 'Value'},
+    )
+    fig_bar.update_layout(xaxis_title='Condition', yaxis_title='Value', title_x=0.5)
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # Individual plate results
+    show_individual = st.checkbox("Show Individual Plates with Error Bars", value=False)
+    if show_individual and hasattr(st.session_state, 'individual_values'):
+        st.subheader("Individual Plate Results")
+
+        for plate_name in st.session_state.individual_values['Plate'].unique():
+            plate_subset = st.session_state.individual_values[
+                st.session_state.individual_values['Plate'] == plate_name
+            ].groupby('Condition').agg({
+                'Value': ['mean', 'sem']
+            }).reset_index()
+
+            plate_subset.columns = ['Condition', 'Value', 'SEM']
+
+            fig_plate = px.bar(
+                plate_subset,
+                x='Condition',
+                y='Value',
+                error_y='SEM',
+                color='Value',
+                color_continuous_scale='Viridis',
+                title=f'ELISA Results for {plate_name}',
+                labels={'Value': 'Value'},
+            )
+            fig_plate.update_layout(
+                xaxis_title='Condition',
+                yaxis_title='Value',
+                title_x=0.5
+            )
+            st.plotly_chart(fig_plate, use_container_width=True)
+
+    # Add checkbox for combined bar and scatter plot
+    show_combined = st.checkbox("Show Combined Bar and Individual Points Plot", value=False)
+    if show_combined and hasattr(st.session_state, 'individual_values'):
+        st.subheader("Combined Bar and Individual Points Plot")
+
+        # Get individual points
+        individual_df = st.session_state.individual_values
+
+        # Calculate summary statistics
+        summary_stats = individual_df.groupby('Condition').agg({
+            'Value': ['mean', 'sem']
+        }).reset_index()
+        summary_stats.columns = ['Condition', 'Mean', 'SEM']
+
+        # Create single figure
+        fig = go.Figure()
+
+        # Add bar plot first (it will be in the background)
+        fig.add_trace(go.Bar(
+            x=summary_stats['Condition'],
+            y=summary_stats['Mean'],
+            error_y=dict(
+                type='data',
+                array=summary_stats['SEM'],
+                visible=True,
+                thickness=1.5,
+                width=4
+            ),
+            name='Mean ± SEM',
+            marker_color='rgba(158,202,225,0.6)',
+            marker_line_color='rgb(8,48,107)',
+            marker_line_width=1.5,
+            width=0.6  # Make bars narrower
+        ))
+
+        # Add scatter points for each condition
+        for condition in individual_df['Condition'].unique():
+            condition_data = individual_df[individual_df['Condition'] == condition]
+
+            # Calculate positions for swarm-like distribution
+            values = condition_data['Value'].values
+            n_points = len(values)
+
+            # Calculate x positions for swarm-like effect
+            x_positions = []
+            y_positions = sorted(values)  # Sort values for better distribution
+
+            for i, y in enumerate(y_positions):
+                # Calculate base position
+                x_base = condition
+
+                # Add jitter based on density of points
+                if i > 0:
+                    # Find distance to nearest point
+                    distances = np.abs(np.array(y_positions[:i]) - y)
+                    min_dist = np.min(distances)
+
+                    # Scale jitter based on distance
+                    jitter_scale = min(0.3, 1.0 / (min_dist + 0.1))
+                    jitter = 0.2 * jitter_scale * (-1 if i % 2 == 0 else 1)
+                else:
+                    jitter = 0
+
+                x_positions.append(x_base)
+
+            fig.add_trace(go.Scatter(
+                x=x_positions,
+                y=y_positions,
+                mode='markers',
+                name=condition,
+                marker=dict(
+                    size=8,
+                    opacity=0.7,
+                    color='grey'
+                ),
+                hovertemplate=(
+                    "Condition: %{text}<br>" +
+                    "Value: %{y:.2f}<br>" +
+                    "Plate: %{customdata}<extra></extra>"
+                ),
+                text=[condition] * len(condition_data),
+                customdata=condition_data['Plate'],
+                showlegend=False
+            ))
+
+        # Update layout
+        fig.update_layout(
+            title='Combined Bar Plot with Individual Points',
+            xaxis_title='Condition',
+            yaxis_title='Value',
+            title_x=0.5,
+            showlegend=True,
+            plot_bgcolor='white',
+            xaxis=dict(
+                showgrid=False,
+                showline=True,
+                linecolor='black',
+                tickfont=dict(size=12),
+                ticks='outside',
+                type='category'  # This ensures proper categorical axis
+            ),
+            yaxis=dict(
+                showgrid=True,
+                showline=True,
+                linecolor='black',
+                gridcolor='lightgrey',
+                tickfont=dict(size=12),
+                ticks='outside'
+            )
+        )
+
+        # Add customization options
+        #st.subheader("Customize Combined Plot")
+        col1, col2, col3 = st.columns(3)
+        point_color = '#101010'
+        bar_color = '#2a788e'
+        point_size = 8
+
+        # Update plot with custom colors
+        fig_custom = go.Figure(fig)
+
+        # Update scatter plot colors and size
+        for i in range(1, len(fig_custom.data)):  # Start from 1 to skip the bar plot
+            fig_custom.data[i].marker.update(
+                color=point_color,
+                size=point_size
+            )
+
+        # Update bar color
+        fig_custom.data[0].marker.update(
+            color=f'rgba{tuple(int(bar_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)) + (0.6,)}',
+            line=dict(
+                color=f'rgba{tuple(int(bar_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)) + (1,)}',
+                width=1.5
+            )
+        )
+
+        # Show updated plot
+        st.plotly_chart(fig_custom, use_container_width=True)
 
   
 def main():  
